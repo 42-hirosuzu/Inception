@@ -1,0 +1,44 @@
+server {
+    listen 443 ssl http2;
+  server_name hirosuzu.42.fr;
+
+  ssl_certificate     /run/secrets/tls_cert;
+  ssl_certificate_key /run/secrets/tls_key;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers on;
+  # 追加で modern な cipher を設定してもOK
+  root /var/www/html;
+  index index.php index.html;
+
+  location / {
+    try_files $uri $uri/ /index.php?$args;
+    }
+  location ~ \.php$ {
+  include fastcgi_params;
+  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+  fastcgi_pass wordpress:9000;   # php-fpm の 9000 番へ
+}
+    # listen 80 default_server;
+    # listen [::]:80 default_server;
+    # server_name _;
+
+    # # Webファイルのルートディレクトリを定義 (必須)
+    # root /var/www/html;
+
+    # # デフォルトで表示するファイルを指定
+    # index index.php index.html index.htm index.nginx-debian.html;
+
+    # # / へのアクセスをindex.phpで処理するための設定
+    # location / {
+    #     try_files $uri $uri/ /index.php?$args;
+    # }
+
+    # # PHPファイルのリクエストをWordPressコンテナに渡す設定
+    # location ~ \.php$ {
+    #     include fastcgi_params;
+    #     fastcgi_pass wordpress:9000;
+        
+    #     # 実行するスクリプトのフルパスをPHP-FPMに伝える (必須)
+    #     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    # }
+}

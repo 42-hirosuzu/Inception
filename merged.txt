@@ -1,0 +1,822 @@
+■■■ Directory Structure ■■■
+.
+├── Makefile
+├── debug
+│   ├── Dockerfile
+│   ├── docker-compose-debug.yml
+│   ├── index.php
+│   ├── nginx.conf
+│   ├── supervisord.conf
+│   └── www.conf
+├── merge_file.sh
+├── merged.txt
+├── scripts
+│   └── bootstrap_secrets.sh
+├── secrets
+│   ├── db_password.txt
+│   ├── db_root_password.txt
+│   ├── tls.crt
+│   ├── tls.key
+│   ├── wp_admin_password.txt
+│   └── wp_user2_password.txt
+└── srcs
+    ├── docker-compose.yml
+    └── requirements
+        ├── mariadb
+        │   ├── 50-server.cnf
+        │   ├── Dockerfile
+        │   ├── conf
+        │   ├── run.sh
+        │   └── tools
+        ├── nginx
+        │   ├── Dockerfile
+        │   └── default
+        └── wordpress
+            ├── Dockerfile
+            ├── conf
+            │   └── www.conf
+            └── tools
+                └── wp-setup.sh
+
+13 directories, 25 files
+
+----
+
+■■■ File Contents ■■■
+
+Directory: .
+File:      .gitignore
+---------------------------------
+secrets/
+!secrets/README.md
+*.crt
+*.key
+
+----
+
+Directory: ./debug
+File:      docker-compose-debug.yml
+---------------------------------
+version: '3.7'
+
+services:
+  debug_app:
+    container_name: debug_container
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
+
+----
+
+Directory: ./debug
+File:      Dockerfile
+---------------------------------
+FROM debian:bullseye
+
+# NginxとPHP-FPMの両方をインストールする
+RUN apt-get update && apt-get install -y nginx php7.4-fpm
+
+# 設定ファイルをコンテナ内にコピーする
+COPY nginx.conf /etc/nginx/sites-enabled/default
+COPY www.conf /etc/php/7.4/fpm/pool.d/www.conf
+COPY index.php /var/www/html/
+
+# PHP-FPMがソケットファイルを作るためのディレクトリを作成
+RUN mkdir -p /run/php
+
+# コンテナ起動時に両方のサービスを開始するスクリプトを実行
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+
+# Supervisorをインストール
+RUN apt-get install -y supervisor
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+----
+
+Directory: ./debug
+File:      index.php
+---------------------------------
+<?php
+phpinfo();
+?>
+
+----
+
+Directory: ./debug
+File:      nginx.conf
+---------------------------------
+server {
+    listen 80;
+    server_name localhost;
+    root /var/www/html;
+    index index.php;
+
+    location / {
+        try_files $uri $uri/ /index.php?$args;
+    }
+
+    location ~ \.php$ {
+        # コンテナ間通信ではないため、TCPポートではなくUnixソケットを使う
+        fastcgi_pass unix:/run/php/php7.4-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    }
+}
+
+----
+
+Directory: ./debug
+File:      supervisord.conf
+---------------------------------
+[supervisord]
+nodaemon=true
+
+[program:php-fpm]
+command=/usr/sbin/php-fpm7.4 -F
+autostart=true
+autorestart=true
+stderr_logfile=/dev/stdout
+stderr_logfile_maxbytes=0
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+
+[program:nginx]
+command=/usr/sbin/nginx -g "daemon off;"
+autostart=true
+autorestart=true
+stderr_logfile=/dev/stdout
+stderr_logfile_maxbytes=0
+stdout_logfile=/dev/stdout
+stdout_logfile_maxbytes=0
+
+----
+
+Directory: ./debug
+File:      www.conf
+---------------------------------
+[www]
+user = www-data
+group = www-data
+; TCPポートではなく、Unixソケットで待ち受ける設定に戻す
+listen = /run/php/php7.4-fpm.sock
+listen.owner = www-data
+listen.group = www-data
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+
+----
+
+Directory: .
+File:      Makefile
+---------------------------------
+# srcsディレクトリにあるdocker-compose.ymlを対象にするための変数
+COMPOSE_FILE = srcs/docker-compose.yml
+DB = db
+WP = wordpress
+NX = nginx
+
+# デフォルトのターゲット
+all: build up
+
+# Dockerイメージをビルドする
+build:
+	@docker-compose -f $(COMPOSE_FILE) build
+
+# コンテナをバックグラウンドで起動する
+up:
+	@docker-compose -f $(COMPOSE_FILE) up -d
+
+# コンテナを停止する
+down:
+	@docker-compose -f $(COMPOSE_FILE) down
+
+# コンテナを停止し、関連するボリュームも削除する
+clean:
+	@docker-compose -f $(COMPOSE_FILE) down --volumes
+
+# コンテナとイメージを全て削除し、再ビルドして起動する
+re: clean
+	@docker-compose -f $(COMPOSE_FILE) up --build -d
+
+# ログを表示する
+logs:
+	@docker-compose -f $(COMPOSE_FILE) logs -f
+
+logs-wp:
+	@docker-compose -f $(COMPOSE_FILE) logs -f $(WP)
+logs-nginx:
+	@docker-compose -f $(COMPOSE_FILE) logs -f $(NX)
+logs-db:
+	@docker-compose -f $(COMPOSE_FILE) logs -f $(DB)
+
+ps:
+	@docker-compose -f $(COMPOSE_FILE) ps
+
+.PHONY: all build up run down clean re logs logs-wp logs-nginx logs-db ps
+
+----
+
+Directory: ./scripts
+File:      bootstrap_secrets.sh
+---------------------------------
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOGIN="hirosuzu"
+SECRETS_DIR="secrets"
+DATA_BASE="/home/${LOGIN}/data"
+
+mkdir -p "${SECRETS_DIR}"
+chmod 700 "${SECRETS_DIR}"
+
+make_secret () { # make_secret <path>
+  if [[ ! -f "$1" ]]; then
+    # URLやシェルで扱いやすい文字のみ（32バイト=64hex）
+    openssl rand -hex 32 > "$1"
+    chmod 600 "$1"
+    echo "created: $1"
+  else
+    echo "exists : $1 (skip)"
+  fi
+}
+
+make_secret "${SECRETS_DIR}/db_root_password.txt"
+make_secret "${SECRETS_DIR}/db_password.txt"
+make_secret "${SECRETS_DIR}/wp_admin_password.txt"
+make_secret "${SECRETS_DIR}/wp_user2_password.txt"
+
+# TLS証明書（自己署名）— 既存ならスキップ
+if [[ ! -f "${SECRETS_DIR}/tls.crt" || ! -f "${SECRETS_DIR}/tls.key" ]]; then
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout "${SECRETS_DIR}/tls.key" -out "${SECRETS_DIR}/tls.crt" \
+    -subj "/CN=${LOGIN}.42.fr"
+  chmod 600 "${SECRETS_DIR}/tls.key" "${SECRETS_DIR}/tls.crt"
+  echo "created: tls.key/tls.crt"
+else
+  echo "exists : tls.key/tls.crt (skip)"
+fi
+
+# ホスト永続ディレクトリ（要件の場所）
+mkdir -p "${DATA_BASE}/db" "${DATA_BASE}/wp"
+
+# .gitignore 追記（重複回避）
+GI=".gitignore"
+add_ignore () { grep -qxF "$1" "$GI" 2>/dev/null || echo "$1" >> "$GI"; }
+add_ignore "secrets/"
+add_ignore "!secrets/README.md"
+add_ignore "*.crt"
+add_ignore "*.key"
+
+echo "Done."
+
+
+----
+
+Directory: ./secrets
+File:      db_password.txt
+---------------------------------
+8ee921d3a6f5e137ace69586c131bd712d264344d99da217cb34f5556ffd44ad
+
+----
+
+Directory: ./secrets
+File:      db_root_password.txt
+---------------------------------
+126dd0f4f8f60b508eb0911bc97afe659d7da6ed3e8fcebd0ab505c546b21c03
+
+----
+
+Directory: ./secrets
+File:      tls.crt
+---------------------------------
+-----BEGIN CERTIFICATE-----
+MIIDEzCCAfugAwIBAgIUL/HXCdvGVpoftHCUORtLpGRbJ8UwDQYJKoZIhvcNAQEL
+BQAwGTEXMBUGA1UEAwwOaGlyb3N1enUuNDIuZnIwHhcNMjUwODE2MTI1ODM0WhcN
+MjYwODE2MTI1ODM0WjAZMRcwFQYDVQQDDA5oaXJvc3V6dS40Mi5mcjCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAKtD5HhKKt3/gdvex6NwM1yOAIsRHsNl
+shZBThDjVyDcV4GOG4+3l2JXfbfXRmsRNGZZCtJf+L6BRmqo77dD5Wa+DfJxlXga
+oR8DOyZdJs+wevD69jEIQPgQSAYKrufFeSXYC6nR2PFngjkM5JpYrI7m7+Rxxkdg
+1EO8Yqi3KMpruy+JlHIZa98z3ejjs+oCYKqABT/vWEGkczQXn8/kyyegvR3KkuPL
+8UCd6RwcT2yYCFZyciWwABMwW8g2FsOs4Aa+55SHhUgDI/4XuJ8VwK7YKH7MG42p
+fedjtQJLLKMJOIl190k1dYXLN72wYwV1Cg1QKL2DYS/McqKCYV4lESECAwEAAaNT
+MFEwHQYDVR0OBBYEFPCMWn8J0/utJpkz7rqtxwYwmyFzMB8GA1UdIwQYMBaAFPCM
+Wn8J0/utJpkz7rqtxwYwmyFzMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQEL
+BQADggEBAD8gIcKFVPTmrv0zhYX7FaWwhBucD+immB1nlc1sWi0vZwdqJr4kT27/
+nc9Z6fQkMYVKdVAqSerCZnVeuHQABT32E3sGsnW259siyYZ73FnoQMGQuyp5T14p
+fySNjIqUURiDjBU1kZUcN63mqw/At+G11EWNy779MPaj5qBGkuazHWqfog4DgZNR
+tpl4UQZuuv3nw48ZdBfF51/NkXxivavl/bWjNZ1xi8uhd3VuZu82LU+hU2cI4y6h
+5wrKKA5hWsiKeBSo4Hhb7/2ycDQPwmZcBWjOPV2Adk641K3ZS+0289e3I/PJ+Jsu
+PSFXRPxeNr4TDcAgKKnCIKtV5L0RBYw=
+-----END CERTIFICATE-----
+
+----
+
+Directory: ./secrets
+File:      tls.key
+---------------------------------
+-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCrQ+R4Sird/4Hb
+3sejcDNcjgCLER7DZbIWQU4Q41cg3FeBjhuPt5diV32310ZrETRmWQrSX/i+gUZq
+qO+3Q+Vmvg3ycZV4GqEfAzsmXSbPsHrw+vYxCED4EEgGCq7nxXkl2Aup0djxZ4I5
+DOSaWKyO5u/kccZHYNRDvGKotyjKa7sviZRyGWvfM93o47PqAmCqgAU/71hBpHM0
+F5/P5MsnoL0dypLjy/FAnekcHE9smAhWcnIlsAATMFvINhbDrOAGvueUh4VIAyP+
+F7ifFcCu2Ch+zBuNqX3nY7UCSyyjCTiJdfdJNXWFyze9sGMFdQoNUCi9g2EvzHKi
+gmFeJREhAgMBAAECggEAB2GTMK39n/i5l4jH8N7Oj+Ac3OF9gm1ZGgVxgF/T6vok
+GVTPEkgW0am0pN41zjp9GCYhRcTWGxvGNaWXQz49Xkq1nivQBc+b/xKsE3CzUgMo
+oUcnoiBZcHd/Kyd9t0Z2/K8NfaGqKGlOHvhTx+Undrc0QpO2uG/PZiXx2JSgQO0G
+jv/DVjHAsBPtaZHQEJLeMbXyWDaEJyLb4sHHuLqzb1AcfAS4Go39iSS+OKbg4q36
+OdaA370a5SN8aDWybhG/hs9uR6e8UzJh0SbzZ2KYmobaTNimRd3wGG4cXswkuLM3
+513p9ru0V48JE9Qb9oIyaOzFv4uNM70u22k3zIcYYQKBgQDm+mBATSoxUpd5Aj+a
+vPKp3NfulsRQXtJ/2RC8LEE04Gw7l72tuLNNgj54Smr5ybLGfFx1Ph8YVjy67I3B
+5uTgY+wH55/TGtSULZt9sCRgCd6kboodtciOHCHQSRVTEF5gnJO2rP2KTIpXN0uZ
+ZlBPL8OnguGT3tm23MZREvDg6QKBgQC90YYb6KddjMggbRQQ+9o3AAmERR59bSyV
+iY2e78elJB/+0MLKIldlgp5mOWp/3gCXp7eSYslzHQk9o8V1SSpIunAp2k/iIPj+
+tC7G704wdeS7D6xXb1tX5pxSCci5GCIzdZ+9w7hjSrY82X1Sya6vQMc4jk6H6Ivm
+FzWKoSLLeQKBgFcaD/Xvo3uaE7j0Whv2KORZfaxheoJ8X5EKwD7VyXkxMF+Ap2y9
+fBA8j2Y5WgH8R8iF2S/1TzCURK6QyhxW//SGedm5RRIMyiFe2YYaSH1W+3iynq75
+gDnm7fFnvfzm7VAte56lua7PklO1bHLanGpgLr4aowpqPVuyAa9NHz0RAoGADefI
+fEjp4deLXZzACJJ6pObSy6bImgWia339KvSD2pwv39npOyeS4XPVKMXyAFYCExoN
+P6MPAOjSoXpa38GxYEyQJPDCQ12JABexCY/EWZZ5YB7A0FLvDRxuvS/MTYrwDncC
+ccNhwZxah1CjdqohquMC9SivphMqFHwExxgQ1XkCgYBUoOzogWH9Ntfie0z+3y5Z
+nqXBXcoq379t+mXt6tJOnt9HsxjY153BvnYpF7iZS4K20RohhyXXYH1HDCyIAn4L
+l4N/UkcdSWKcs273lI/gSjNtxmtttJBoHqT6n8yPcZ1khd7ai9Mdo65EizS2SHZD
+6vQep8Z8UItHym/9VaBygQ==
+-----END PRIVATE KEY-----
+
+----
+
+Directory: ./secrets
+File:      wp_admin_password.txt
+---------------------------------
+63e645f4bb63756f5dcd90396c0c6cf2441dfcf92d998695480368b1a950b2f9
+
+----
+
+Directory: ./secrets
+File:      wp_user2_password.txt
+---------------------------------
+a9c3e2b089ea08af7502ec88533874f3e9de7f0ad00fe5fc2d00b64c1e9d1036
+
+----
+
+Directory: ./srcs
+File:      .env
+---------------------------------
+DOMAIN_NAME=hirosuzu.42.fr
+WORDPRESS_URL=https://hirosuzu.42.fr
+WORDPRESS_TITLE=inception
+MYSQL_DATABASE=wordpress
+MYSQL_USER=wpuser
+----
+
+Directory: ./srcs
+File:      docker-compose.yml
+---------------------------------
+# version: '3'
+
+services:
+  db:
+    build: ./requirements/mariadb
+    image: db:1.0
+    container_name: mariadb
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+    volumes:
+      - type: bind
+        source: /home/hirosuzu/data/db
+        target: /var/lib/mysql
+    secrets:
+      - db_root_password
+      - db_password
+    networks: [inception]
+    restart: always
+
+  wordpress:
+    container_name: wordpress
+    build: ./requirements/wordpress
+    image: wordpress:1.0
+    
+    volumes:
+      - type: bind
+        source: /home/hirosuzu/data/wp
+        target: /var/www/html
+      # - ./requirements/wordpress/html:/var/www/html
+    environment:
+      WORDPRESS_DB_HOST: db:3306
+      WORDPRESS_DB_USER: ${MYSQL_USER}
+      WORDPRESS_DB_PASSWORD_FILE: /run/secrets/db_password
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE}
+      WORDPRESS_URL: ${WORDPRESS_URL}
+      WORDPRESS_TITLE: ${WORDPRESS_TITLE}
+      WORDPRESS_ADMIN_USER: siteowner             # ← admin禁止
+      WORDPRESS_ADMIN_PASSWORD_FILE: /run/secrets/wp_admin_password
+      WORDPRESS_ADMIN_EMAIL: admin@example.com
+      WORDPRESS_USER2: writer1
+      WORDPRESS_USER2_EMAIL: writer1@example.com
+      WORDPRESS_USER2_PASSWORD_FILE: /run/secrets/wp_user2_password
+    secrets:
+      - db_password
+      - wp_admin_password
+      - wp_user2_password
+    depends_on:
+      - db
+    restart: always
+    networks: [inception]
+
+  nginx:
+    container_name: nginx
+    build: ./requirements/nginx
+    image: nginx:1.0
+    ports:
+      - "443:443"
+    volumes:
+      - type: bind
+        source: /home/hirosuzu/data/wp
+        target: /var/www/html
+        read_only: true
+      # - ./requirements/wordpress/html:/var/www/html
+    secrets:
+      - tls_cert
+      - tls_key
+    depends_on:
+      - wordpress
+    restart: always
+    networks: [inception]
+
+networks:
+  inception: {}
+
+secrets:
+  db_root_password:
+    file: ../secrets/db_root_password.txt
+  db_password:
+    file: ../secrets/db_password.txt
+  wp_admin_password:
+    file: ../secrets/wp_admin_password.txt
+  wp_user2_password:
+    file: ../secrets/wp_user2_password.txt
+  tls_cert:
+    file: ../secrets/tls.crt
+  tls_key:
+    file: ../secrets/tls.key
+
+
+----
+
+Directory: ./srcs/requirements/mariadb
+File:      50-server.cnf
+---------------------------------
+#
+# These groups are read by MariaDB server.
+# Use it for options that only the server (but not clients) should see
+
+# this is read by the standalone daemon and embedded servers
+[server]
+
+# this is only for the mysqld standalone daemon
+[mysqld]
+
+#
+# * Basic Settings
+#
+
+user                    = root
+pid-file                = /run/mysqld/mysqld.pid
+basedir                 = /usr
+datadir                 = /var/lib/mysql
+tmpdir                  = /tmp
+lc-messages-dir         = /usr/share/mysql
+lc-messages             = en_US
+skip-external-locking
+
+# Broken reverse DNS slows down connections considerably and name resolve is
+# safe to skip if there are no "host by domain name" access grants
+#skip-name-resolve
+
+# Instead of skip-networking the default is now to listen only on
+# localhost which is more compatible and is not less secure.
+# bind-address            = 127.0.0.1
+
+#
+# * Fine Tuning
+#
+
+#key_buffer_size        = 128M
+#max_allowed_packet     = 1G
+#thread_stack           = 192K
+#thread_cache_size      = 8
+# This replaces the startup script and checks MyISAM tables if needed
+# the first time they are touched
+#myisam_recover_options = BACKUP
+#max_connections        = 100
+#table_cache            = 64
+
+#
+# * Logging and Replication
+#
+
+# Both location gets rotated by the cronjob.
+# Be aware that this log type is a performance killer.
+# Recommend only changing this at runtime for short testing periods if needed!
+#general_log_file       = /var/log/mysql/mysql.log
+#general_log            = 1
+
+# When running under systemd, error logging goes via stdout/stderr to journald
+# and when running legacy init error logging goes to syslog due to
+# /etc/mysql/conf.d/mariadb.conf.d/50-mysqld_safe.cnf
+# Enable this if you want to have error logging into a separate file
+#log_error = /var/log/mysql/error.log
+# Enable the slow query log to see queries with especially long duration
+#slow_query_log_file    = /var/log/mysql/mariadb-slow.log
+#long_query_time        = 10
+#log_slow_verbosity     = query_plan,explain
+#log-queries-not-using-indexes
+#min_examined_row_limit = 1000
+
+# The following can be used as easy to replay backup logs or for replication.
+# note: if you are setting up a replication slave, see README.Debian about
+#       other settings you may need to change.
+#server-id              = 1
+#log_bin                = /var/log/mysql/mysql-bin.log
+expire_logs_days        = 10
+#max_binlog_size        = 100M
+
+#
+# * SSL/TLS
+#
+
+# For documentation, please read
+# https://mariadb.com/kb/en/securing-connections-for-client-and-server/
+#ssl-ca = /etc/mysql/cacert.pem
+#ssl-cert = /etc/mysql/server-cert.pem
+#ssl-key = /etc/mysql/server-key.pem
+#require-secure-transport = on
+
+#
+# * Character sets
+#
+
+# MySQL/MariaDB default is Latin1, but in Debian we rather default to the full
+# utf8 4-byte character set. See also client.cnf
+character-set-server  = utf8mb4
+collation-server      = utf8mb4_general_ci
+
+#
+# * InnoDB
+#
+
+# InnoDB is enabled by default with a 10MB datafile in /var/lib/mysql/.
+# Read the manual for more InnoDB related options. There are many!
+# Most important is to give InnoDB 80 % of the system RAM for buffer use:
+# https://mariadb.com/kb/en/innodb-system-variables/#innodb_buffer_pool_size
+#innodb_buffer_pool_size = 8G
+
+# this is only for embedded server
+[embedded]
+
+# This group is only read by MariaDB servers, not by MySQL.
+# If you use the same .cnf file for MySQL and MariaDB,
+# you can put MariaDB-only options here
+[mariadb]
+
+# This group is only read by MariaDB-10.5 servers.
+# If you use the same .cnf file for MariaDB of different versions,
+# use this group for options that older servers don't understand
+[mariadb-10.5]
+
+----
+
+Directory: ./srcs/requirements/mariadb
+File:      Dockerfile
+---------------------------------
+FROM debian:bullseye
+
+RUN apt-get update && apt-get install -y mariadb-server && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /run/mysqld /var/lib/mysql
+
+COPY 50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
+# COPY init.sql /etc/mysql/init.sql
+COPY run.sh /usr/local/bin/run.sh
+RUN chmod +x /usr/local/bin/run.sh
+
+ENTRYPOINT ["/usr/local/bin/run.sh"]
+
+# RUN /run/mysqld
+
+# CMD ["mysqld"]
+----
+
+Directory: ./srcs/requirements/mariadb
+File:      run.sh
+---------------------------------
+DB_NAME="${MYSQL_DATABASE}"
+DB_USER="${MYSQL_USER}"
+DB_PASS="$(cat /run/secrets/db_password)"
+ROOT_PASS="$(cat /run/secrets/db_root_password)"
+
+if [ ! -d /var/lib/mysql/mysql ]; then
+  mariadb-install-db --user=root --ldata=/var/lib/mysql >/dev/null
+  # 初期化SQLを一括投入
+  cat <<SQL | mysqld --user=root --bootstrap
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PASS}';
+CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
+CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}';
+GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'%';
+FLUSH PRIVILEGES;
+SQL
+fi
+
+exec mysqld --user=root --console
+
+----
+
+Directory: ./srcs/requirements/nginx
+File:      default
+---------------------------------
+server {
+    listen 443 ssl http2;
+  server_name hirosuzu.42.fr;
+
+  ssl_certificate     /run/secrets/tls_cert;
+  ssl_certificate_key /run/secrets/tls_key;
+  ssl_protocols TLSv1.2 TLSv1.3;
+  ssl_prefer_server_ciphers on;
+  # 追加で modern な cipher を設定してもOK
+  root /var/www/html;
+  index index.php index.html;
+
+  location / {
+    try_files $uri $uri/ /index.php?$args;
+    }
+  location ~ \.php$ {
+  include fastcgi_params;
+  fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+  fastcgi_pass wordpress:9000;   # php-fpm の 9000 番へ
+}
+    # listen 80 default_server;
+    # listen [::]:80 default_server;
+    # server_name _;
+
+    # # Webファイルのルートディレクトリを定義 (必須)
+    # root /var/www/html;
+
+    # # デフォルトで表示するファイルを指定
+    # index index.php index.html index.htm index.nginx-debian.html;
+
+    # # / へのアクセスをindex.phpで処理するための設定
+    # location / {
+    #     try_files $uri $uri/ /index.php?$args;
+    # }
+
+    # # PHPファイルのリクエストをWordPressコンテナに渡す設定
+    # location ~ \.php$ {
+    #     include fastcgi_params;
+    #     fastcgi_pass wordpress:9000;
+        
+    #     # 実行するスクリプトのフルパスをPHP-FPMに伝える (必須)
+    #     fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+    # }
+}
+
+----
+
+Directory: ./srcs/requirements/nginx
+File:      Dockerfile
+---------------------------------
+FROM debian:bullseye
+
+RUN apt-get update && apt-get install -y nginx curl
+
+# Webルートディレクトリを作成し、Nginxの実行ユーザーに所有権を与える
+RUN mkdir -p /var/www/html && \
+    chown -R www-data:www-data /var/www/html
+
+COPY default /etc/nginx/sites-enabled/default
+
+ENTRYPOINT ["nginx", "-g", "daemon off;"]
+
+----
+
+Directory: ./srcs/requirements/wordpress/conf
+File:      www.conf
+---------------------------------
+[www]
+user = www-data
+group = www-data
+listen = 0.0.0.0:9000
+listen.owner = www-data
+listen.group = www-data
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+
+----
+
+Directory: ./srcs/requirements/wordpress
+File:      Dockerfile
+---------------------------------
+FROM debian:bullseye
+
+RUN apt-get update && apt-get install -y \
+	php7.4-fpm php-mysql vim curl mariadb-client && \
+	rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /run/php /var/www/html
+
+COPY conf/www.conf /etc/php/7.4/fpm/pool.d/www.conf
+COPY tools/wp-setup.sh /usr/local/bin/wp-setup.sh
+
+RUN chmod +x /usr/local/bin/wp-setup.sh
+
+# ENTRYPOINT ["php-fpm7.4", "-F"]
+ENTRYPOINT ["/usr/local/bin/wp-setup.sh"]
+
+----
+
+Directory: ./srcs/requirements/wordpress/tools
+File:      wp-setup.sh
+---------------------------------
+#!/bin/bash
+set -e
+
+cd /var/www/html
+
+# 環境変数からデータベースの設定を取得
+DB_NAME="${WORDPRESS_DB_NAME:-wordpress}"
+DB_USER="${WORDPRESS_DB_USER:-wpuser}"
+# *_FILE が指定されていればSecretsから読み取り
+if [[ -n "${WORDPRESS_DB_PASSWORD_FILE:-}" && -f "${WORDPRESS_DB_PASSWORD_FILE}" ]]; then
+  DB_PASS="$(cat "${WORDPRESS_DB_PASSWORD_FILE}")"
+else
+  DB_PASS="${WORDPRESS_DB_PASSWORD:-password}"
+fi
+DB_HOST="${WORDPRESS_DB_HOST:-db}"
+host_only="${DB_HOST%%:*}"
+until mysqladmin ping -h"${host_only}" --silent; do
+  echo "waiting for MariaDB..."
+  sleep 2
+done
+until mysql -h"${host_only}" -u"${DB_USER}" -p"${DB_PASS}" -e 'SELECT 1' >/dev/null 2>&1; do
+  echo "waiting for grants for ${DB_USER}..."
+  sleep 2
+done
+
+# 既に展開済みならスキップ
+if [ ! -f wp-cli.phar ]; then
+   curl -sS -o wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+   chmod +x wp-cli.phar
+fi
+# 本体は無ければDL（既に index.php があればスキップ）
+if [ ! -f index.php ]; then
+  ./wp-cli.phar core download --force --allow-root
+fi
+# wp-config.php が無ければ生成
+if [ ! -f wp-config.php ]; then
+  ./wp-cli.phar config create \
+    --dbname="${DB_NAME}" \
+    --dbuser="${DB_USER}" \
+    --dbpass="${DB_PASS}" \
+    --dbhost="${DB_HOST}" \
+    --skip-check --force \
+    --allow-root
+fi
+# 未インストールなら install
+ADMIN_PASS="$( [[ -n "${WORDPRESS_ADMIN_PASSWORD_FILE:-}" && -f "${WORDPRESS_ADMIN_PASSWORD_FILE}" ]] && cat "${WORDPRESS_ADMIN_PASSWORD_FILE}" || echo "${WORDPRESS_ADMIN_PASSWORD:-admin}" )"
+USER2_PASS="$( [[ -n "${WORDPRESS_USER2_PASSWORD_FILE:-}" && -f "${WORDPRESS_USER2_PASSWORD_FILE}" ]] && cat "${WORDPRESS_USER2_PASSWORD_FILE}" || echo "${WORDPRESS_USER2_PASSWORD:-changeme}" )"
+
+# 禁止名チェック（admin/administrator を含まない）
+if [[ "${WORDPRESS_ADMIN_USER:-admin}" =~ [Aa]dmin|[Aa]dministrator ]]; then
+  echo "ERROR: WORDPRESS_ADMIN_USER に admin/administrator 系は使用不可"; exit 1
+fi
+
+if ! ./wp-cli.phar core is-installed --allow-root; then
+  ./wp-cli.phar core install \
+    --url="${WORDPRESS_URL:-http://localhost}" \
+    --title="${WORDPRESS_TITLE:-inception}" \
+    --admin_user="${WORDPRESS_ADMIN_USER:-siteowner}" \
+    --admin_password="${ADMIN_PASS}" \
+    --admin_email="${WORDPRESS_ADMIN_EMAIL:-admin@example.com}" \
+    --skip-email --allow-root
+fi
+
+# 2人目ユーザ（存在しなければ作成）
+if ! ./wp-cli.phar user get "${WORDPRESS_USER2:-writer1}" --field=ID --allow-root >/dev/null 2>&1; then
+  ./wp-cli.phar user create "${WORDPRESS_USER2:-writer1}" "${WORDPRESS_USER2_EMAIL:-writer1@example.com}" \
+    --role=author --user_pass="${USER2_PASS}" --allow-root
+fi
+
+# 最後に FPM を前面起動
+exec php-fpm7.4 -F
+
+
+----
