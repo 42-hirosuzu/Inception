@@ -7,7 +7,7 @@ RUN mkdir -p /run/mysqld /var/lib/mysql
 COPY 50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
 # COPY init.sql /etc/mysql/init.sql
 COPY run.sh /usr/local/bin/run.sh
-RUN chmod +x /usr/local/bin/run.sh
+RUN sed -i 's/\r$//' /usr/local/bin/run.sh && chmod +x /usr/local/bin/run.sh
 
 ENTRYPOINT ["/usr/local/bin/run.sh"]
 

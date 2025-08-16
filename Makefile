@@ -3,6 +3,7 @@ COMPOSE_FILE = srcs/docker-compose.yml
 DB = db
 WP = wordpress
 NX = nginx
+LOGIN = hirosuzu
 
 # デフォルトのターゲット
 all: build up
@@ -40,5 +41,17 @@ logs-db:
 
 ps:
 	@docker-compose -f $(COMPOSE_FILE) ps
+
+init:
+	@bash scripts/bootstrap_secrets.sh
+
+curl:
+	@curl -vk https://127.0.0.1/ || true
+
+users:
+	@docker exec -it wordpress bash -lc "cd /var/www/html && ./wp-cli.phar user list --allow-root"
+
+ssl:
+	@docker exec -it nginx sh -lc 'openssl x509 -in /run/secrets/tls_cert -noout -subject -issuer -dates'
 
 .PHONY: all build up run down clean re logs logs-wp logs-nginx logs-db ps

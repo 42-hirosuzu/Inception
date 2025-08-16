@@ -605,7 +605,7 @@ RUN mkdir -p /run/mysqld /var/lib/mysql
 COPY 50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf
 # COPY init.sql /etc/mysql/init.sql
 COPY run.sh /usr/local/bin/run.sh
-RUN chmod +x /usr/local/bin/run.sh
+RUN sed -i 's/\r$//' /usr/local/bin/run.sh && chmod +x /usr/local/bin/run.sh
 
 ENTRYPOINT ["/usr/local/bin/run.sh"]
 
@@ -617,6 +617,9 @@ ENTRYPOINT ["/usr/local/bin/run.sh"]
 Directory: ./srcs/requirements/mariadb
 File:      run.sh
 ---------------------------------
+#!/bin/sh
+set -eu
+
 DB_NAME="${MYSQL_DATABASE}"
 DB_USER="${MYSQL_USER}"
 DB_PASS="$(cat /run/secrets/db_password)"
@@ -624,14 +627,14 @@ ROOT_PASS="$(cat /run/secrets/db_root_password)"
 
 if [ ! -d /var/lib/mysql/mysql ]; then
   mariadb-install-db --user=root --ldata=/var/lib/mysql >/dev/null
-  # 初期化SQLを一括投入
-  cat <<SQL | mysqld --user=root --bootstrap
-ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PASS}';
+  # 初回だけ init-file で実行（通常モードなので GRANT 可）
+  cat >/tmp/init.sql <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'%' IDENTIFIED BY '${DB_PASS}';
 GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'%';
 FLUSH PRIVILEGES;
 SQL
+  exec mysqld --user=root --init-file=/tmp/init.sql --console
 fi
 
 exec mysqld --user=root --console
@@ -799,6 +802,8 @@ if [[ "${WORDPRESS_ADMIN_USER:-admin}" =~ [Aa]dmin|[Aa]dministrator ]]; then
   echo "ERROR: WORDPRESS_ADMIN_USER に admin/administrator 系は使用不可"; exit 1
 fi
 
+ADMIN_PASS="$( [[ -n "${WORDPRESS_ADMIN_PASSWORD_FILE:-}" && -f "${WORDPRESS_ADMIN_PASSWORD_FILE}" ]] && cat "${WORDPRESS_ADMIN_PASSWORD_FILE}" || echo "${WORDPRESS_ADMIN_PASSWORD:-admin}" )"
+USER2_PASS="$( [[ -n "${WORDPRESS_USER2_PASSWORD_FILE:-}" && -f "${WORDPRESS_USER2_PASSWORD_FILE}" ]] && cat "${WORDPRESS_USER2_PASSWORD_FILE}" || echo "${WORDPRESS_USER2_PASSWORD:-changeme}" )"
 if ! ./wp-cli.phar core is-installed --allow-root; then
   ./wp-cli.phar core install \
     --url="${WORDPRESS_URL:-http://localhost}" \
@@ -810,10 +815,13 @@ if ! ./wp-cli.phar core is-installed --allow-root; then
 fi
 
 # 2人目ユーザ（存在しなければ作成）
-if ! ./wp-cli.phar user get "${WORDPRESS_USER2:-writer1}" --field=ID --allow-root >/dev/null 2>&1; then
+./wp-cli.phar user get "${WORDPRESS_USER2:-writer1}" --field=ID --allow-root >/dev/null 2>&1 || \
   ./wp-cli.phar user create "${WORDPRESS_USER2:-writer1}" "${WORDPRESS_USER2_EMAIL:-writer1@example.com}" \
     --role=author --user_pass="${USER2_PASS}" --allow-root
-fi
+# if ! ./wp-cli.phar user get "${WORDPRESS_USER2:-writer1}" --field=ID --allow-root >/dev/null 2>&1; then
+#   ./wp-cli.phar user create "${WORDPRESS_USER2:-writer1}" "${WORDPRESS_USER2_EMAIL:-writer1@example.com}" \
+#     --role=author --user_pass="${USER2_PASS}" --allow-root
+# fi
 
 # 最後に FPM を前面起動
 exec php-fpm7.4 -F

@@ -32,6 +32,7 @@ find . -type f \
   -not -name "$output_file" \
   -not -name "$(basename "$0")" \
   -not -path "./srcs/requirements/wordpress/html/*" \
+  -not -path "./.git/*" \
 | while read -r filepath; do
 
     # ディレクトリ名を取得
